@@ -1,57 +1,103 @@
+//==========================================================================================
+// AUDIO SETUP
+//------------------------------------------------------------------------------------------
+// Load the WASM file and connect it to the audio output.
+//------------------------------------------------------------------------------------------
+//==========================================================================================
 let dspNode = null;
-const audioStatus = document.getElementById('audio-status');
-const knock = new FaustWasm2ScriptProcessor("knock", { wasmPath: "wasm/knock.wasm" });
+let dspNodeParams = null;
+let jsonParams = null;
 
-knock.createDSP(audioContext, 1024).then(node => {
-    if (!node) {
-        if (audioStatus) audioStatus.textContent = 'Could not load wasm/knock.wasm. Open this page through a web server or GitHub Pages, and upload the wasm folder.';
-        return;
-    }
-    dspNode = node;
-    dspNode.connect(audioContext.destination);
-    console.log("Knock controls:", dspNode.getParams());
-    if (audioStatus) audioStatus.textContent = audioContext.state === 'running'
-        ? 'Audio on. Shake left/right, or tap to test.'
-        : 'Sound ready. Tap “Turn On DSP” to start.';
-    if (audioContext.state === 'running') playAudio(0.7);
-});
+// Interaction 1 uses the door knock sound.
+const dspName = "knock";
+const instance = new FaustWasm2ScriptProcessor(dspName, { wasmPath: "wasm/knock.wasm" });
 
-if (location.protocol === 'file:' && audioStatus) {
-    audioStatus.textContent = 'Local file mode cannot load WASM. Use Live Server or GitHub Pages.';
+if (typeof module === "undefined") {
+    window[dspName] = instance;
+} else {
+    const exp = {};
+    exp[dspName] = instance;
+    module.exports = exp;
 }
 
-let restingX = 0;
-let previousMotion = 0;
-let lastDirection = 0;
-let lastKnockAt = -Infinity;
+instance.createDSP(audioContext, 1024)
+    .then(node => {
+        if (!node) return;
+        dspNode = node;
+        dspNode.connect(audioContext.destination);
+        console.log('params: ', dspNode.getParams());
+        const jsonString = dspNode.getJSON();
+        jsonParams = JSON.parse(jsonString)["ui"][0]["items"];
+        dspNodeParams = jsonParams;
+    });
 
-function accelerationChange(accx) {
-    if (!Number.isFinite(accx)) return;
-    // Remove gravity and slow tilting so a quick left/right motion is detected.
-    restingX = restingX * 0.9 + accx * 0.1;
-    const motion = accx - restingX;
-    const threshold = sliders[0]?.value() ?? 8;
-    const direction = Math.sign(motion);
-    const now = millis();
-    if (Math.abs(motion) >= threshold &&
-        (Math.abs(previousMotion) < threshold * 0.6 || direction !== lastDirection) &&
-        now - lastKnockAt > 170) {
-        const strength = Math.min(0.85, Math.max(0.3, Math.abs(motion) / 24));
-        if (playAudio(strength)) {
-            lastKnockAt = now;
-            lastDirection = direction;
-            shaketimer = now;
-            statusLabels[0]?.style("color", "pink");
+//==========================================================================================
+// INTERACTIONS
+//------------------------------------------------------------------------------------------
+// Read motion and decide when to call playAudio().
+//------------------------------------------------------------------------------------------
+//==========================================================================================
+let lastXSign = 0;
+let xChanges = 0;
+let lastXPeak = 0;
+let lastKnock = -Infinity;
+let nativeMotion = false;
+let baselineReady = false;
+let baselineX = 0;
+let baselineY = 0;
+
+function checkXShake(x, y, now, linear) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!linear) {
+        // Remove gravity when the phone only provides raw acceleration.
+        if (!baselineReady) {
+            baselineX = x;
+            baselineY = y;
+            baselineReady = true;
+            return;
         }
+        baselineX = baselineX * 0.9 + x * 0.1;
+        baselineY = baselineY * 0.9 + y * 0.1;
+        x -= baselineX;
+        y -= baselineY;
     }
-    previousMotion = motion;
+
+    const threshold = sliders[0]?.value() ?? 8;
+    if (Math.abs(x) < threshold || Math.abs(x) <= Math.abs(y) * 1.25) return;
+    const sign = Math.sign(x);
+    if (sign === lastXSign) return;
+
+    const gap = now - lastXPeak;
+    xChanges = lastXSign && gap >= 70 && gap <= 800 ? xChanges + 1 : 0;
+    lastXSign = sign;
+    lastXPeak = now;
+
+    // Two reversals (+, -, +) count as a repeated X-axis shake.
+    if (xChanges >= 2 && now - lastKnock >= 130) {
+        if (playAudio(Math.abs(x) / 24)) lastKnock = now;
+    }
 }
 
-function rotationChange() {}
+function accelerationChange(accx, accy, accz) {
+    if (!nativeMotion) checkXShake(accx, accy, millis(), false);
+}
 
-// Desktop preview: click the page after turning on the DSP.
+// Use native motion data when available; p5 acceleration can be zero on some phones.
+window.addEventListener('devicemotion', event => {
+    const a = event.acceleration;
+    const linear = a && Number.isFinite(a.x) && Number.isFinite(a.y);
+    const sample = linear ? a : event.accelerationIncludingGravity;
+    if (!sample) return;
+    if (!nativeMotion) baselineReady = false;
+    nativeMotion = true;
+    checkXShake(sample.x, sample.y, performance.now(), linear);
+}, { passive: true });
+
+function rotationChange(rotx, roty, rotz) {}
+
 function mousePressed() {
-    playAudio(0.55);
+    // Click to test the sound on a computer.
+    playAudio(0.6);
 }
 
 function deviceMoved() {
@@ -63,13 +109,29 @@ function deviceTurned() {
     threshVals[1] = turnAxis;
 }
 
-// The built-in p5 shake event considers all axes; horizontal motion is handled above.
-function deviceShaken() {}
+function deviceShaken() {
+    // The X-axis detector above decides when to play.
+}
 
-function playAudio(strength = 0.55) {
-    if (!dspNode || audioContext.state !== "running") return false;
-    dspNode.setParamValue("/knock/strength", strength);
+function getMinMaxParam(address) {
+    const param = findByAddress(dspNodeParams, address);
+    return getParamMinMax(param);
+}
+
+//==========================================================================================
+// AUDIO INTERACTION
+//------------------------------------------------------------------------------------------
+// Set the Faust parameters that produce the sound.
+//------------------------------------------------------------------------------------------
+//==========================================================================================
+function playAudio(strength = 0.6) {
+    if (!dspNode || audioContext.state !== 'running') return false;
+    dspNode.setParamValue("/knock/strength", Math.min(0.85, Math.max(0.3, strength)));
     dspNode.setParamValue("/knock/knock", 1);
     setTimeout(() => dspNode.setParamValue("/knock/knock", 0), 45);
     return true;
 }
+
+//==========================================================================================
+// END
+//==========================================================================================

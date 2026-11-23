@@ -1,21 +1,17 @@
 //==========================================================================================
 // AUDIO SETUP
 //------------------------------------------------------------------------------------------
-//
+// Load the WASM file and connect it to the audio output.
 //------------------------------------------------------------------------------------------
-// Edit just where you're asked to!
-//------------------------------------------------------------------------------------------
-//
 //==========================================================================================
 let dspNode = null;
 let dspNodeParams = null;
 let jsonParams = null;
 
-// Change here to ("tuono") depending on your wasm file name
-const dspName = "bells";
-const instance = new FaustWasm2ScriptProcessor(dspName);
+// Interaction 2 uses the bubble sound.
+const dspName = "bubble";
+const instance = new FaustWasm2ScriptProcessor(dspName, { wasmPath: "wasm/bubble.wasm" });
 
-// output to window or npm package module
 if (typeof module === "undefined") {
     window[dspName] = instance;
 } else {
@@ -24,43 +20,89 @@ if (typeof module === "undefined") {
     module.exports = exp;
 }
 
-// The name should be the same as the WASM file, so change tuono with brass if you use brass.wasm
-bells.createDSP(audioContext, 1024)
+instance.createDSP(audioContext, 1024)
     .then(node => {
+        if (!node) return;
         dspNode = node;
         dspNode.connect(audioContext.destination);
         console.log('params: ', dspNode.getParams());
         const jsonString = dspNode.getJSON();
         jsonParams = JSON.parse(jsonString)["ui"][0]["items"];
-        dspNodeParams = jsonParams
-        // const exampleMinMaxParam = findByAddress(dspNodeParams, "/thunder/rumble");
-        // // ALWAYS PAY ATTENTION TO MIN AND MAX, ELSE YOU MAY GET REALLY HIGH VOLUMES FROM YOUR SPEAKERS
-        // const [exampleMinValue, exampleMaxValue] = getParamMinMax(exampleMinMaxParam);
-        // console.log('Min value:', exampleMinValue, 'Max value:', exampleMaxValue);
+        dspNodeParams = jsonParams;
     });
-
 
 //==========================================================================================
 // INTERACTIONS
 //------------------------------------------------------------------------------------------
-//
+// Read motion and decide when to call playAudio().
 //------------------------------------------------------------------------------------------
-// Edit the next functions to create interactions
-// Decide which parameters you're using and then use playAudio to play the Audio
-//------------------------------------------------------------------------------------------
-//
 //==========================================================================================
+let lastYSign = 0;
+let yChanges = 0;
+let lastYPeak = 0;
+let lastBubble = -Infinity;
+let nativeMotion = false;
+let baselineReady = false;
+let baselineX = 0;
+let baselineY = 0;
+let thresholdReady = false;
+
+function checkYShake(x, y, now, linear) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!linear) {
+        // Remove gravity when the phone only provides raw acceleration.
+        if (!baselineReady) {
+            baselineX = x;
+            baselineY = y;
+            baselineReady = true;
+            return;
+        }
+        baselineX = baselineX * 0.9 + x * 0.1;
+        baselineY = baselineY * 0.9 + y * 0.1;
+        x -= baselineX;
+        y -= baselineY;
+    }
+
+    // The shared page starts at 30; use 8 for a practical Y-axis threshold.
+    if (!thresholdReady && sliders[0]) {
+        sliders[0].value(8);
+        thresholdReady = true;
+    }
+    const threshold = sliders[0]?.value() ?? 8;
+    if (Math.abs(y) < threshold || Math.abs(y) <= Math.abs(x) * 1.25) return;
+    const sign = Math.sign(y);
+    if (sign === lastYSign) return;
+
+    const gap = now - lastYPeak;
+    yChanges = lastYSign && gap >= 70 && gap <= 800 ? yChanges + 1 : 0;
+    lastYSign = sign;
+    lastYPeak = now;
+
+    // Two reversals (+, -, +) count as a repeated Y-axis shake.
+    if (yChanges >= 2 && now - lastBubble >= 130) {
+        if (playAudio(Math.abs(y) / 24)) lastBubble = now;
+    }
+}
 
 function accelerationChange(accx, accy, accz) {
-    // playAudio()
+    if (!nativeMotion) checkYShake(accx, accy, millis(), false);
 }
 
-function rotationChange(rotx, roty, rotz) {
-}
+window.addEventListener('devicemotion', event => {
+    const a = event.acceleration;
+    const linear = a && Number.isFinite(a.x) && Number.isFinite(a.y);
+    const sample = linear ? a : event.accelerationIncludingGravity;
+    if (!sample) return;
+    if (!nativeMotion) baselineReady = false;
+    nativeMotion = true;
+    checkYShake(sample.x, sample.y, performance.now(), linear);
+}, { passive: true });
+
+function rotationChange(rotx, roty, rotz) {}
 
 function mousePressed() {
-    // playAudio()
-    // Use this for debugging from the desktop!
+    // Click to test the sound on a computer.
+    playAudio(0.7);
 }
 
 function deviceMoved() {
@@ -71,39 +113,30 @@ function deviceMoved() {
 function deviceTurned() {
     threshVals[1] = turnAxis;
 }
+
 function deviceShaken() {
-    shaketimer = millis();
-    statusLabels[0].style("color", "pink");
-    playAudio();
+    // The Y-axis detector above decides when to play.
 }
 
 function getMinMaxParam(address) {
-    const exampleMinMaxParam = findByAddress(dspNodeParams, address);
-    // ALWAYS PAY ATTENTION TO MIN AND MAX, ELSE YOU MAY GET REALLY HIGH VOLUMES FROM YOUR SPEAKERS
-    const [exampleMinValue, exampleMaxValue] = getParamMinMax(exampleMinMaxParam);
-    console.log('Min value:', exampleMinValue, 'Max value:', exampleMaxValue);
-    return [exampleMinValue, exampleMaxValue]
+    const param = findByAddress(dspNodeParams, address);
+    return getParamMinMax(param);
 }
 
 //==========================================================================================
 // AUDIO INTERACTION
 //------------------------------------------------------------------------------------------
-//
+// Set the Faust parameters that produce the sound.
 //------------------------------------------------------------------------------------------
-// Edit here to define your audio controls 
-//------------------------------------------------------------------------------------------
-//
 //==========================================================================================
-
-function playAudio() {
-    if (!dspNode) {
-        return;
-    }
-    if (audioContext.state === 'suspended') {
-        return;
-    }
-    dspNode.setParamValue("/englishBell/gate", 1)
-    setTimeout(() => { dspNode.setParamValue("/englishBell/gate", 0) }, 100);
+function playAudio(strength = 0.7) {
+    if (!dspNode || audioContext.state !== 'running') return false;
+    const frequency = 350 + Math.round(1050 * Math.min(1, strength));
+    dspNode.setParamValue("/bubble/bubble/freq", frequency);
+    dspNode.setParamValue("/bubble/bubble/volume", 0.75);
+    dspNode.setParamValue("/bubble/drop", 1);
+    setTimeout(() => dspNode.setParamValue("/bubble/drop", 0), 45);
+    return true;
 }
 
 //==========================================================================================
