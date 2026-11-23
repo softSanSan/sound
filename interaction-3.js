@@ -1,5 +1,6 @@
 // Interaction 3: three gestures, three sounds.
-// Left/right shake -> door knock; up/down shake -> bubbles; resting flat -> wind.
+// Repeated X acceleration reversals -> knock; repeated Y reversals -> bubbles;
+// resting flat -> wind.
 let dspNode = null; // Kept for the shared Turn On DSP button in sketch.js.
 const knock = new FaustWasm2ScriptProcessor('knock', { wasmPath: 'wasm/knock.wasm' });
 const bubble = new FaustWasm2ScriptProcessor('bubble', { wasmPath: 'wasm/bubble.wasm' });
@@ -10,8 +11,8 @@ const description = document.querySelector('#info p');
 if (description) {
     description.innerHTML = `
         <b>Three gestures, three sounds</b><br><br>
-        1. Shake left/right: knock on a door.<br>
-        2. Shake up/down: make bubbles; a stronger shake makes a higher bubble.<br>
+        1. Repeated changes in X acceleration (left/right): knock on a door.<br>
+        2. Repeated changes in Y acceleration (up/down): make bubbles.<br>
         3. Hold the phone flat and still: hear wind; lift it to stop the wind.<br><br>
         On a computer, use the three test buttons above. On a phone, tap
         “Turn On DSP”, allow motion access, and hold it upright in portrait mode
@@ -119,12 +120,48 @@ async function testOnComputer(name) {
 
 let gravityX = 0, gravityY = 0, gravityZ = 0;
 let gravityReady = false;
-let previousX = 0, previousY = 0;
-let lastShakeAt = -Infinity;
+const axisPeaks = {
+    x: { sign: 0, at: -Infinity, reversals: 0 },
+    y: { sign: 0, at: -Infinity, reversals: 0 }
+};
+let lastSoundAt = -Infinity;
 let flatSince = null;
 let windPlaying = false;
 let windStoppedAt = -Infinity;
 let nativeMotionSeen = false;
+
+function resetAxisPeaks() {
+    for (const state of Object.values(axisPeaks)) {
+        state.sign = 0;
+        state.at = -Infinity;
+        state.reversals = 0;
+    }
+}
+
+function repeatedAxisChange(axis, value, other, threshold, now) {
+    // Ignore weak or diagonal movement; only count clear peaks on one axis.
+    if (Math.abs(value) < threshold || Math.abs(value) <= Math.abs(other) * 1.25) return;
+    const state = axisPeaks[axis];
+    const sign = Math.sign(value);
+    if (sign === state.sign) return;
+    const interval = now - state.at;
+    state.reversals = state.sign !== 0 && interval >= 70 && interval <= 800
+        ? state.reversals + 1 : 0;
+    state.sign = sign;
+    state.at = now;
+
+    // +, -, + (or -, +, -) is one repeated back-and-forth shake.
+    if (state.reversals < 2 || now - lastSoundAt < 130) return;
+    const intensity = Math.min(1, Math.abs(value) / 24);
+    const played = axis === 'x' ? triggerKnock(intensity) : triggerBubble(intensity);
+    if (!played) return;
+    lastSoundAt = now;
+    shaketimer = now;
+    statusLabels[0]?.style('color', 'pink');
+    testStatus.textContent = axis === 'x'
+        ? 'Repeated X acceleration: knock.'
+        : 'Repeated Y acceleration: bubbles.';
+}
 
 function processMotion(x, y, z, hasGravity, now, linear = null) {
     if (![x, y, z].every(Number.isFinite)) return;
@@ -163,25 +200,13 @@ function processMotion(x, y, z, hasGravity, now, linear = null) {
     }
 
     const threshold = typeof sliders !== 'undefined' ? (sliders[0]?.value() ?? 8) : 8;
-    // Lifting a flat phone changes its gravity vector; that is not a bubble shake.
-    if (!wasWindPlaying && now - windStoppedAt >= 350 && now - lastShakeAt >= 220) {
-        const horizontal = Math.abs(shakeX) >= threshold && Math.abs(shakeX) > Math.abs(shakeY) * 1.25 &&
-            Math.abs(previousX) < threshold * 0.6;
-        const vertical = Math.abs(shakeY) >= threshold && Math.abs(shakeY) > Math.abs(shakeX) * 1.25 &&
-            Math.abs(previousY) < threshold * 0.6;
-        if (horizontal || vertical) {
-            const intensity = Math.min(1, (horizontal ? Math.abs(shakeX) : Math.abs(shakeY)) / 24);
-            const played = horizontal ? triggerKnock(intensity) : triggerBubble(intensity);
-            if (played) {
-                lastShakeAt = now;
-                shaketimer = now;
-                statusLabels[0]?.style('color', 'pink');
-                testStatus.textContent = horizontal ? 'Horizontal shake: knock.' : 'Vertical shake: bubbles.';
-            }
-        }
+    // A lift from the flat position is an orientation change, not a shake.
+    if (wasWindPlaying || now - windStoppedAt < 350) {
+        resetAxisPeaks();
+        return;
     }
-    previousX = shakeX;
-    previousY = shakeY;
+    repeatedAxisChange('x', shakeX, shakeY, threshold, now);
+    repeatedAxisChange('y', shakeY, shakeX, threshold, now);
 }
 
 // Read native motion as well as p5: some phones report zero p5 acceleration.
@@ -195,7 +220,7 @@ window.addEventListener('devicemotion', event => {
     if (!nativeMotionSeen) {
         // Discard p5's initial zero readings before the first real sensor sample.
         gravityReady = false;
-        previousX = previousY = 0;
+        resetAxisPeaks();
     }
     nativeMotionSeen = true;
     processMotion(sample.x, sample.y, sample.z, Boolean(validGravity), performance.now(), linear);
@@ -217,7 +242,5 @@ function deviceTurned() {
     threshVals[1] = turnAxis;
 }
 
-// sketch.js calls this once when its shared Turn On DSP button starts audio.
-function playAudio(strength = 0.6) {
-    return triggerKnock(strength);
-}
+// sketch.js calls playAudio on startup; gestures and test buttons own the sounds.
+function playAudio() { return false; }
