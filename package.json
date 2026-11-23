@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "verify:wasm": "node scripts/verify-wasm.mjs"
+  },
+  "devDependencies": {
+    "@grame/faustwasm": "0.23.0"
+  }
+}

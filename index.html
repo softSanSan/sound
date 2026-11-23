@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Cache-Control"
+      content="no-cache, max-age=0, must-revalidate"
+    />
+    <title>p5.js faust example</title>
+    <link rel="stylesheet" href="styles.css" /> 
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.js"></script>
+    <script src="dsp.js"></script>
+  </head>
+
+  <body class="grid-container fullbody">
+    <nav class="primary-nav">
+      <li><a href="index.html">Interaction 1</a></li>
+      <li><a href="sound2.html">Interaction 2</a></li>
+      <li><a href="sound3.html">Interaction 3</a></li>
+    </nav>
+
+    <p id="audio-status" role="status">Loading sound…</p>
+
+    <div id="info">
+      <p>
+        <b>Horizontal shake → door knock</b>
+        <br /><br />
+        On your phone, tap “Turn On DSP” and allow motion sensor access. Hold the
+        phone upright, then shake it left and right to knock on a wooden door.
+        Adjust the horizontal shake threshold if the sound triggers too easily
+        or not often enough. On a computer, click the page to preview a knock.
+      </p>
+    </div>
+
+    <footer>
+      <p>
+        Developed by Maurizio Berta and Laura McHugh
+        <br />
+        for
+        <a href="https://github.com/mauriziobrt/DT2140-Sound-Interaction-Lab"
+          >DT2140 Multimodal Interfaces Sound Interaction Lab</a
+        >
+        <br />
+        KTH Royal Institute of Technology, 2025
+      </p>
+    </footer>
+  </body>
+  <script src="helpers.js"></script>
+  <script src="interaction-1.js"></script>
+  <script src="sketch.js"></script>
+</html>
